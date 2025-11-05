@@ -15,14 +15,20 @@ type Event struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+type UserAuth struct {
+	Username   string    `json:"username"`
+	Password   string    `json:"password"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 type UserStore struct {
 	basePath string
 	db       *sql.DB
 }
 
-func NewUserStore(basePath string, userID int64) (*UserStore, error) {
+func NewUserStore(basePath string, username string) (*UserStore, error) {
 	// Create user-specific directory structure
-	userPath := filepath.Join(basePath, fmt.Sprintf("user_%d", userID))
+	userPath := filepath.Join(basePath, username)
 	if err := os.MkdirAll(userPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create user directory: %w", err)
 	}
@@ -46,6 +52,19 @@ func NewUserStore(basePath string, userID int64) (*UserStore, error) {
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create events table: %w", err)
+	}
+
+	// Initialize the auth table
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS auth (
+			username TEXT PRIMARY KEY,
+			password TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to create auth table: %w", err)
 	}
 
 	return &UserStore{
@@ -109,4 +128,32 @@ func (s *UserStore) GetEvents(eventType string) ([]Event, error) {
 	}
 
 	return events, nil
+}
+
+func (s *UserStore) StoreAuth(username, hashedPassword string) error {
+	_, err := s.db.Exec(
+		"INSERT INTO auth (username, password, created_at) VALUES (?, ?, ?)",
+		username, hashedPassword, time.Now(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store auth: %w", err)
+	}
+	return nil
+}
+
+func (s *UserStore) GetAuth(username string) (*UserAuth, error) {
+	auth := &UserAuth{}
+	err := s.db.QueryRow(
+		"SELECT username, password, created_at FROM auth WHERE username = ?",
+		username,
+	).Scan(&auth.Username, &auth.Password, &auth.CreatedAt)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get auth: %w", err)
+	}
+
+	return auth, nil
 }

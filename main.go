@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -35,27 +34,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Initialize main database for user authentication
-	authDB, err := sql.Open("sqlite3", "data/auth.db")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer authDB.Close()
-
-	// Create users table
-	_, err = authDB.Exec(`
-		CREATE TABLE IF NOT EXISTS users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			username TEXT UNIQUE NOT NULL,
-			password TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	authService := auth.NewAuthService(authDB)
+	authService := auth.NewAuthService("data/users")
 
 	r := gin.Default()
 
@@ -92,7 +71,6 @@ func main() {
 
 		// Generate JWT token
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"user_id":  user.ID,
 			"username": user.Username,
 			"exp":      time.Now().Add(time.Hour * 24).Unix(),
 		})
@@ -121,8 +99,8 @@ func main() {
 			return
 		}
 
-		userID := c.GetInt64("user_id")
-		userStore, err := store.NewUserStore(filepath.Join("data", "users"), userID)
+		username := c.GetString("username")
+		userStore, err := store.NewUserStore(filepath.Join("data", "users"), username)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -142,8 +120,8 @@ func main() {
 	authorized.GET("/events", func(c *gin.Context) {
 		eventType := c.Query("type") // Optional filter by event type
 
-		userID := c.GetInt64("user_id")
-		userStore, err := store.NewUserStore(filepath.Join("data", "users"), userID)
+		username := c.GetString("username")
+		userStore, err := store.NewUserStore(filepath.Join("data", "users"), username)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -190,7 +168,6 @@ func authMiddleware() gin.HandlerFunc {
 		}
 
 		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			c.Set("user_id", int64(claims["user_id"].(float64)))
 			c.Set("username", claims["username"].(string))
 			c.Next()
 		} else {
