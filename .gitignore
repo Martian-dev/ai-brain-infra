@@ -5,3 +5,5 @@ dist/
 .env
 data/
 *.db
+
+ai-brain-api
