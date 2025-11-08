@@ -96,10 +96,23 @@ CREATE TABLE events (
 
 ### Go API (port 8080) - All require Bearer token
 
+#### General
+
 - `GET /health` - Service status + JWKS cache stats
 - `GET /me` - Current user info from JWT
+
+#### Events
+
 - `POST /events` - Store event for authenticated user
 - `GET /events?type=X` - Retrieve user's events (filtered)
+
+#### Mail Sync (New!)
+
+- `POST /mail/connect` - Connect mail account and start sync
+- `GET /mail/status` - Get sync status for user
+- `POST /mail/disconnect` - Stop mail sync
+
+See [MAIL_SYNC.md](./MAIL_SYNC.md) for detailed mail sync documentation.
 
 ## Setup
 
@@ -108,6 +121,7 @@ CREATE TABLE events (
 - Go 1.21+
 - Node.js 18+
 - SQLite3
+- NATS Server with JetStream (for mail sync)
 
 ### Installation
 
@@ -120,12 +134,23 @@ go mod download
 cd auth-server && npm install
 ```
 
-2. Configure environment:
+2. Install and start NATS (for mail sync):
+
+```bash
+# Using Docker
+docker run -d -p 4222:4222 -p 8222:8222 --name nats nats -js
+
+# Or install locally
+brew install nats-server
+nats-server -js
+```
+
+3. Configure environment:
 
 ```bash
 # Root .env
 cp .env.example .env
-# Edit: Set AUTH_SERVER_URL=http://localhost:3000
+# Edit: Set AUTH_SERVER_URL, NATS_URL, and OAuth credentials
 
 # Auth server .env
 cd auth-server
@@ -133,25 +158,28 @@ cp .env.example .env
 # Edit: Set BETTER_AUTH_SECRET (32+ chars)
 ```
 
-3. Initialize auth database:
+4. Initialize auth database:
 
 ```bash
 cd auth-server
 npm run migrate
 ```
 
-4. Start services:
+5. Start services:
 
 ```bash
-# Terminal 1: Auth server
+# Terminal 1: NATS
+nats-server -js
+
+# Terminal 2: Auth server
 cd auth-server
 npm run dev
 
-# Terminal 2: Go API
+# Terminal 3: Go API
 go run main.go
 ```
 
-5. Test:
+6. Test:
 
 ```bash
 ./test-integration.sh
@@ -161,17 +189,34 @@ go run main.go
 
 ```
 /
-├── main.go                    # API server, routes, middleware
+├── main.go                         # API server, routes, middleware
 ├── internal/
-│   ├── auth/jwt.go           # JWKS fetch/cache, JWT validation
-│   └── store/store.go        # Per-user SQLite storage
+│   ├── auth/
+│   │   ├── jwt.go                 # JWKS fetch/cache, JWT validation
+│   │   └── token_provider.go     # OAuth token management
+│   ├── store/store.go             # Per-user SQLite storage
+│   ├── sync/                      # Mail sync orchestration
+│   │   ├── provider.go           # Provider interfaces
+│   │   ├── runner.go             # Sync runner
+│   │   └── manager.go            # Multi-user sync manager
+│   ├── providers/                 # Mail provider adapters
+│   │   ├── gmail/adapter.go
+│   │   └── outlook/adapter.go
+│   ├── eventstore/sqlite/         # Per-user event store
+│   │   ├── schema.sql
+│   │   └── store.go
+│   └── nats/jetstream.go         # NATS JetStream publisher
 ├── auth-server/
 │   ├── src/
-│   │   ├── index.ts          # Auth server, JWT generation
-│   │   └── lib/auth.ts       # Better Auth config
-│   └── data/auth.db          # User/session data
-├── data/users/{id}/events.db # Per-user event storage
-└── test-integration.sh       # Integration tests
+│   │   ├── index.ts              # Auth server, JWT generation
+│   │   └── lib/auth.ts           # Better Auth config
+│   └── data/auth.db              # User/session data
+├── data/
+│   ├── auth.db                   # OAuth tokens
+│   └── users/{id}/events.db      # Per-user event storage
+├── MAIL_SYNC.md                  # Mail sync documentation
+├── QUICKSTART_MAIL_SYNC.md       # Mail sync quick start
+└── test-integration.sh           # Integration tests
 ```
 
 ## Expected Performance

@@ -3,6 +3,19 @@ import { jwt } from "better-auth/plugins";
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
+import dotenv from "dotenv";
+
+// Load environment variables first
+dotenv.config();
+
+console.log(
+  "[Auth Config] GOOGLE_CLIENT_ID:",
+  process.env.GOOGLE_CLIENT_ID ? "SET" : "MISSING"
+);
+console.log(
+  "[Auth Config] GOOGLE_CLIENT_SECRET:",
+  process.env.GOOGLE_CLIENT_SECRET ? "SET" : "MISSING"
+);
 
 // Ensure data directory exists
 const dataDir = path.join(process.cwd(), "data");
@@ -29,6 +42,22 @@ export const auth = betterAuth({
     requireEmailVerification: false,
     // Auto-signin after signup for better UX
     autoSignIn: true,
+  },
+  socialProviders: {
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID as string,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+      accessType: "offline", // Always get refresh token
+      prompt: "consent", // Always get refresh token
+      scope: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.metadata",
+      ],
+    },
+    microsoft: {
+      clientId: process.env.MICROSOFT_CLIENT_ID as string,
+      clientSecret: process.env.MICROSOFT_CLIENT_SECRET as string,
+    },
   },
   plugins: [
     jwt({
