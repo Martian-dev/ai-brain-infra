@@ -15,56 +15,44 @@ type Event struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-type UserAuth struct {
-	Username   string    `json:"username"`
-	Password   string    `json:"password"`
-	CreatedAt  time.Time `json:"created_at"`
-}
-
 type UserStore struct {
 	basePath string
 	db       *sql.DB
 }
 
-func NewUserStore(basePath string, username string) (*UserStore, error) {
-	// Create user-specific directory structure
-	userPath := filepath.Join(basePath, username)
+func NewUserStore(basePath string, userID string) (*UserStore, error) {
+	// Create user-specific directory structure using user ID
+	userPath := filepath.Join(basePath, userID)
 	if err := os.MkdirAll(userPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create user directory: %w", err)
 	}
 
-	// Open SQLite database for user
+	// Open SQLite database for user with optimizations
 	dbPath := filepath.Join(userPath, "events.db")
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_synchronous=NORMAL&cache=shared")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Initialize the events table
+	// Set connection pool settings for better performance
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(time.Hour)
+
+	// Initialize the events table with optimized schema
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			type TEXT NOT NULL,
 			data TEXT NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)
+		);
+		CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+		CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at DESC);
 	`)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create events table: %w", err)
-	}
-
-	// Initialize the auth table
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS auth (
-			username TEXT PRIMARY KEY,
-			password TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create auth table: %w", err)
 	}
 
 	return &UserStore{
@@ -110,7 +98,7 @@ func (s *UserStore) GetEvents(eventType string) ([]Event, error) {
 		args = append(args, eventType)
 	}
 	
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY created_at DESC LIMIT 1000" // Limit for performance
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -128,32 +116,4 @@ func (s *UserStore) GetEvents(eventType string) ([]Event, error) {
 	}
 
 	return events, nil
-}
-
-func (s *UserStore) StoreAuth(username, hashedPassword string) error {
-	_, err := s.db.Exec(
-		"INSERT INTO auth (username, password, created_at) VALUES (?, ?, ?)",
-		username, hashedPassword, time.Now(),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to store auth: %w", err)
-	}
-	return nil
-}
-
-func (s *UserStore) GetAuth(username string) (*UserAuth, error) {
-	auth := &UserAuth{}
-	err := s.db.QueryRow(
-		"SELECT username, password, created_at FROM auth WHERE username = ?",
-		username,
-	).Scan(&auth.Username, &auth.Password, &auth.CreatedAt)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to get auth: %w", err)
-	}
-
-	return auth, nil
 }

@@ -5,23 +5,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/Martian-dev/ai-brain-infra/internal/auth"
 	"github.com/Martian-dev/ai-brain-infra/internal/store"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 var (
-	jwtSecret = []byte("your-secret-key") // In production, use environment variable
+	jwtVerifier *auth.JWTVerifier
 )
-
-type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
-}
 
 type EventRequest struct {
 	Type string `json:"type" binding:"required"`
@@ -30,66 +23,44 @@ type EventRequest struct {
 
 func main() {
 	// Create data directory if it doesn't exist
-	if err := os.MkdirAll("data", 0755); err != nil {
+	if err := os.MkdirAll("data/users", 0755); err != nil {
 		log.Fatal(err)
 	}
 
-	authService := auth.NewAuthService("data/users")
+	// Get JWKS URL from environment or use default
+	jwksURL := os.Getenv("BETTER_AUTH_JWKS_URL")
+	if jwksURL == "" {
+		jwksURL = "http://localhost:3000/api/auth/jwks"
+	}
+
+	// Initialize JWT verifier with JWKS caching
+	var err error
+	jwtVerifier, err = auth.NewJWTVerifier(jwksURL)
+	if err != nil {
+		log.Fatalf("Failed to initialize JWT verifier: %v", err)
+	}
+	log.Printf("✓ JWT verifier initialized with JWKS from: %s", jwksURL)
+
+	// Set Gin to release mode for production (can be overridden with GIN_MODE env var)
+	if os.Getenv("GIN_MODE") == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
 	r := gin.Default()
 
-	// Register endpoint
-	r.POST("/register", func(c *gin.Context) {
-		var req LoginRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-
-		user, err := authService.CreateUser(req.Username, req.Password)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		c.JSON(http.StatusCreated, user)
-	})
-
-	// Login endpoint
-	r.POST("/login", func(c *gin.Context) {
-		var req LoginRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-
-		user, err := authService.ValidateUser(req.Username, req.Password)
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-			return
-		}
-
-		// Generate JWT token
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"username": user.Username,
-			"exp":      time.Now().Add(time.Hour * 24).Unix(),
-		})
-
-		tokenString, err := token.SignedString(jwtSecret)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
-			return
-		}
-
+	// Health check endpoint - no auth required
+	r.GET("/health", func(c *gin.Context) {
+		stats := jwtVerifier.GetCacheStats()
 		c.JSON(http.StatusOK, gin.H{
-			"token": tokenString,
-			"user":  user,
+			"status": "ok",
+			"service": "ai-brain-api",
+			"jwks_cache": stats,
 		})
 	})
 
-	// Protected routes
+	// Protected routes - all require JWT authentication
 	authorized := r.Group("/")
-	authorized.Use(authMiddleware())
+	authorized.Use(jwtAuthMiddleware())
 
 	// Store event endpoint
 	authorized.POST("/events", func(c *gin.Context) {
@@ -99,8 +70,17 @@ func main() {
 			return
 		}
 
-		username := c.GetString("username")
-		userStore, err := store.NewUserStore(filepath.Join("data", "users"), username)
+		// Get user from context (set by middleware)
+		user, exists := c.Get("user")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found in context"})
+			return
+		}
+
+		authUser := user.(*auth.User)
+		
+		// Use user ID for storage (not username)
+		userStore, err := store.NewUserStore(filepath.Join("data", "users"), authUser.ID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -120,8 +100,17 @@ func main() {
 	authorized.GET("/events", func(c *gin.Context) {
 		eventType := c.Query("type") // Optional filter by event type
 
-		username := c.GetString("username")
-		userStore, err := store.NewUserStore(filepath.Join("data", "users"), username)
+		// Get user from context
+		user, exists := c.Get("user")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found in context"})
+			return
+		}
+
+		authUser := user.(*auth.User)
+
+		// Use user ID for storage
+		userStore, err := store.NewUserStore(filepath.Join("data", "users"), authUser.ID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -137,43 +126,43 @@ func main() {
 		c.JSON(http.StatusOK, events)
 	})
 
-	log.Fatal(r.Run(":8080"))
+	// Get current user info endpoint
+	authorized.GET("/me", func(c *gin.Context) {
+		user, exists := c.Get("user")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found in context"})
+			return
+		}
+
+		c.JSON(http.StatusOK, user)
+	})
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("🚀 AI Brain API server starting on port %s", port)
+	log.Fatal(r.Run(":" + port))
 }
 
-func authMiddleware() gin.HandlerFunc {
+// jwtAuthMiddleware validates JWT tokens using the JWX library with JWKS caching
+// This middleware is optimized for extremely low latency:
+// - Uses cached JWKS (no network I/O on most requests)
+// - Minimal allocations
+// - Fast-path validation
+func jwtAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		tokenString := c.GetHeader("Authorization")
-		if tokenString == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authorization header"})
-			c.Abort()
-			return
-		}
-
-		// Remove "Bearer " prefix if present
-		if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
-			tokenString = tokenString[7:]
-		}
-
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, jwt.ErrSignatureInvalid
-			}
-			return jwtSecret, nil
-		})
-
+		// Extract and validate JWT token
+		user, err := jwtVerifier.UserFromRequest(c.Request)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			c.Abort()
 			return
 		}
 
-		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			c.Set("username", claims["username"].(string))
-			c.Next()
-		} else {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-			c.Abort()
-			return
-		}
+		// Store user in context for handlers to use
+		c.Set("user", user)
+		c.Next()
 	}
 }
